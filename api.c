@@ -29,7 +29,8 @@
 #if defined(USE_BFLSC) || defined(USE_AVALON) || defined(USE_AVALON2) || \
 	defined(USE_HASHFAST) || defined(USE_BITFURY) || defined(USE_KLONDIKE) || \
 	defined(USE_KNC) || defined(USE_BAB) || defined(USE_DRILLBIT) || \
-	defined(USE_MINION) || defined(USE_COINTERRA) || defined(USE_BITMINE_A1)
+	defined(USE_MINION) || defined(USE_COINTERRA) || defined(USE_BITMINE_A1) || \
+	defined(USE_ANT_S1)
 #define HAVE_AN_ASIC 1
 #endif
 
@@ -131,7 +132,7 @@ static const char SEPARATOR = '|';
 #define JOIN_CMD "CMD="
 #define BETWEEN_JOIN SEPSTR
 
-static const char *APIVERSION = "3.1";
+static const char *APIVERSION = "3.2";
 static const char *DEAD = "Dead";
 static const char *SICK = "Sick";
 static const char *NOSTART = "NoStart";
@@ -153,6 +154,9 @@ static const char *FALSESTR = "false";
 static const char *SHA256STR = "sha256";
 
 static const char *DEVICECODE = ""
+#ifdef USE_ANT_S1
+			"ANT "
+#endif
 #ifdef USE_AVALON
 			"AVA "
 #endif
@@ -878,6 +882,11 @@ static struct api_data *api_add_data_full(struct api_data *root, char *name, enu
 				api_data->data = malloc(4);
 				*(uint8_t *)api_data->data = *(uint8_t *)data;
 				break;
+			case API_INT16:
+				/* Most OSs won't really alloc less than 4 */
+				api_data->data = malloc(4);
+				*(int16_t *)api_data->data = *(int16_t *)data;
+				break;
 			case API_UINT16:
 				/* Most OSs won't really alloc less than 4 */
 				api_data->data = malloc(4);
@@ -962,6 +971,11 @@ struct api_data *api_add_const(struct api_data *root, char *name, const char *da
 struct api_data *api_add_uint8(struct api_data *root, char *name, uint8_t *data, bool copy_data)
 {
 	return api_add_data_full(root, name, API_UINT8, (void *)data, copy_data);
+}
+
+struct api_data *api_add_int16(struct api_data *root, char *name, uint16_t *data, bool copy_data)
+{
+	return api_add_data_full(root, name, API_INT16, (void *)data, copy_data);
 }
 
 struct api_data *api_add_uint16(struct api_data *root, char *name, uint16_t *data, bool copy_data)
@@ -1160,6 +1174,9 @@ static struct api_data *print_data(struct io_data *io_data, struct api_data *roo
 			case API_UINT8:
 				snprintf(buf, sizeof(buf), "%u", *(uint8_t *)root->data);
 				break;
+			case API_INT16:
+				snprintf(buf, sizeof(buf), "%d", *(int16_t *)root->data);
+				break;
 			case API_UINT16:
 				snprintf(buf, sizeof(buf), "%u", *(uint16_t *)root->data);
 				break;
@@ -1173,7 +1190,13 @@ static struct api_data *print_data(struct io_data *io_data, struct api_data *roo
 				snprintf(buf, sizeof(buf), "%"PRIu32, *((uint32_t *)(root->data)));
 				break;
 			case API_HEX32:
+				if (isjson)
+					add_item_buf(item, JSON1);
 				snprintf(buf, sizeof(buf), "0x%08x", *((uint32_t *)(root->data)));
+				add_item_buf(item, buf);
+				if (isjson)
+					add_item_buf(item, JSON1);
+				done = true;
 				break;
 			case API_UINT64:
 				snprintf(buf, sizeof(buf), "%"PRIu64, *((uint64_t *)(root->data)));

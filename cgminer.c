@@ -88,6 +88,10 @@ char *curly = ":D";
 #include "driver-hashfast.h"
 #endif
 
+#ifdef USE_ANT_S1
+#include "driver-bitmain.h"
+#endif
+
 #if defined(USE_BITFORCE) || defined(USE_ICARUS) || defined(USE_AVALON) || defined(USE_AVALON2) || defined(USE_MODMINER)
 #	define USE_FPGA
 #endif
@@ -208,6 +212,9 @@ char *opt_drillbit_options = NULL;
 char *opt_bab_options = NULL;
 #ifdef USE_BITMINE_A1
 char *opt_bitmine_a1_options = NULL;
+#endif
+#ifdef USE_ANT_S1
+char *opt_bitmain_options = NULL;
 #endif
 #ifdef USE_USBUTILS
 char *opt_usb_select = NULL;
@@ -360,7 +367,7 @@ struct sigaction termhandler, inthandler;
 
 struct thread_q *getq;
 
-static int total_work;
+static uint32_t total_work;
 struct work *staged_work = NULL;
 
 struct schedtime {
@@ -1214,6 +1221,17 @@ static struct opt_table opt_config_table[] = {
 		     set_int_0_to_100, opt_show_intval, &opt_avalon_temp,
 		     "Set avalon target temperature"),
 #endif
+#ifdef USE_AVALON2
+	OPT_WITH_ARG("--avalon2-freq",
+		     set_avalon2_freq, NULL, NULL,
+		     "Set frequency range for Avalon2, single value or range"),
+	OPT_WITH_ARG("--avalon2-fan",
+		     set_avalon2_fan, NULL, NULL,
+		     "Set Avalon2 target fan speed"),
+	OPT_WITH_ARG("--avalon2-voltage",
+		     set_avalon2_voltage, NULL, NULL,
+		     "Set Avalon2 core voltage, in millivolts"),
+#endif
 #ifdef USE_BAB
 	OPT_WITH_ARG("--bab-options",
 		     set_bab_options, NULL, NULL,
@@ -1252,6 +1270,29 @@ static struct opt_table opt_config_table[] = {
 		     set_bitburner_fury_options, NULL, NULL,
 		     "Override avalon-options for BitBurner Fury boards baud:miners:asic:timeout:freq"),
 #endif
+#ifdef USE_ANT_S1
+	OPT_WITHOUT_ARG("--bitmain-auto",
+			opt_set_bool, &opt_bitmain_auto,
+			"Adjust bitmain overclock frequency dynamically for best hashrate"),
+	OPT_WITH_ARG("--bitmain-cutoff",
+		     set_int_0_to_100, opt_show_intval, &opt_bitmain_overheat,
+		     "Set bitmain overheat cut off temperature"),
+	OPT_WITH_ARG("--bitmain-fan",
+		     set_bitmain_fan, NULL, NULL,
+		     "Set fanspeed percentage for bitmain, single value or range (default: 20-100)"),
+	OPT_WITH_ARG("--bitmain-freq",
+		     set_bitmain_freq, NULL, NULL,
+		     "Set frequency range for bitmain-auto, single value or range"),
+	OPT_WITHOUT_ARG("--bitmain-hwerror",
+			opt_set_bool, &opt_bitmain_hwerror,
+			"Set bitmain device detect hardware error"),
+	OPT_WITH_ARG("--bitmain-options",
+		     opt_set_charp, NULL, &opt_bitmain_options,
+		     "Set bitmain options baud:miners:asic:timeout:freq"),
+	OPT_WITH_ARG("--bitmain-temp",
+		     set_int_0_to_100, opt_show_intval, &opt_bitmain_temp,
+		     "Set bitmain target temperature"),
+#endif
 #ifdef USE_BITMINE_A1
 	OPT_WITH_ARG("--bitmine-a1-options",
 		     set_bitmine_a1_options, NULL, NULL,
@@ -1261,6 +1302,9 @@ static struct opt_table opt_config_table[] = {
 	OPT_WITH_ARG("--bxf-temp-target",
 		     set_int_0_to_200, opt_show_intval, &opt_bxf_temp_target,
 		     "Set target temperature for BXF devices"),
+	OPT_WITH_ARG("--bxm-bits",
+		     set_int_0_to_100, opt_show_intval, &opt_bxm_bits,
+		     "Set BXM bits for overclocking"),
 #endif
 #ifdef HAVE_CURSES
 	OPT_WITHOUT_ARG("--compact",
@@ -1350,17 +1394,6 @@ static struct opt_table opt_config_table[] = {
 	OPT_WITH_ARG("--kernel-path|-K",
 		     opt_set_charp, opt_show_charp, &opt_kernel_path,
 	             "Specify a path to where bitstream files are"),
-#endif
-#ifdef USE_AVALON2
-	OPT_WITH_ARG("--avalon2-freq",
-		     set_avalon2_freq, NULL, NULL,
-		     "Set frequency range for Avalon2, single value or range"),
-	OPT_WITH_ARG("--avalon2-fan",
-		     set_avalon2_fan, NULL, NULL,
-		     "Set Avalon2 target fan speed"),
-	OPT_WITH_ARG("--avalon2-voltage",
-		     set_avalon2_voltage, NULL, NULL,
-		     "Set Avalon2 core voltage, in millivolts"),
 #endif
 #ifdef USE_KLONDIKE
 	OPT_WITH_ARG("--klondike-options",
@@ -1644,6 +1677,9 @@ extern const char *opt_argv0;
 static char *opt_verusage_and_exit(const char *extra)
 {
 	printf("%s\nBuilt with "
+#ifdef USE_ANT_S1
+		"ant.S1 "
+#endif
 #ifdef USE_AVALON
 		"avalon "
 #endif
@@ -3527,7 +3563,7 @@ static void __kill_work(void)
 /* This should be the common exit path */
 void kill_work(void)
 {
-	__kill_work();
+	cg_completion_timeout(&__kill_work, NULL, 5000);
 
 	quit(0, "Shutdown signal received.");
 }
@@ -3544,7 +3580,7 @@ void app_restart(void)
 {
 	applog(LOG_WARNING, "Attempting to restart %s", packagename);
 
-	__kill_work();
+	cg_completion_timeout(&__kill_work, NULL, 5000);
 	clean_up(true);
 
 #if defined(unix) || defined(__APPLE__)
@@ -3829,7 +3865,7 @@ static char *offset_ntime(const char *ntime, int noffset)
  * prevent a copied work struct from freeing ram belonging to another struct */
 static void _copy_work(struct work *work, const struct work *base_work, int noffset)
 {
-	int id = work->id;
+	uint32_t id = work->id;
 
 	clean_work(work);
 	memcpy(work, base_work, sizeof(struct work));
@@ -6280,6 +6316,9 @@ static void pool_resus(struct pool *pool)
 		applog(LOG_INFO, "Pool %d %s alive", pool->pool_no, pool->rpc_url);
 }
 
+static bool work_filled;
+static bool work_emptied;
+
 /* If this is called non_blocking, it will return NULL for work so that must
  * be handled. */
 static struct work *hash_pop(bool blocking)
@@ -6289,6 +6328,13 @@ static struct work *hash_pop(bool blocking)
 
 	mutex_lock(stgd_lock);
 	if (!HASH_COUNT(staged_work)) {
+		/* Increase the queue if we reach zero and we know we can reach
+		 * the maximum we're asking for. */
+		if (work_filled) {
+			opt_queue++;
+			work_filled = false;
+		}
+		work_emptied = true;
 		if (!blocking)
 			goto out_unlock;
 		do {
@@ -7014,6 +7060,35 @@ struct work *clone_queued_work_bymidstate(struct cgpu_info *cgpu, char *midstate
 	return ret;
 }
 
+/* This function is for finding an already queued work item in the
+ * given que hashtable. Code using this function must be able
+ * to handle NULL as a return which implies there is no matching work.
+ * The calling function must lock access to the que if it is required. */
+struct work *__find_work_byid(struct work *que, uint32_t id)
+{
+	struct work *work, *tmp, *ret = NULL;
+
+	HASH_ITER(hh, que, work, tmp) {
+		if (work->id == id) {
+			ret = work;
+			break;
+		}
+	}
+
+	return ret;
+}
+
+struct work *find_queued_work_byid(struct cgpu_info *cgpu, uint32_t id)
+{
+	struct work *ret;
+
+	rd_lock(&cgpu->qlock);
+	ret = __find_work_byid(cgpu->queued_work, id);
+	rd_unlock(&cgpu->qlock);
+
+	return ret;
+}
+
 void __work_completed(struct cgpu_info *cgpu, struct work *work)
 {
 	cgpu->queued_count--;
@@ -7218,7 +7293,6 @@ void *miner_thread(void *userdata)
 	applog(LOG_DEBUG, "Waiting on sem in miner thread");
 	cgsem_wait(&mythr->sem);
 
-	set_highprio();
 	cgpu->last_device_valid_work = time(NULL);
 	drv->hash_work(mythr);
 out:
@@ -7882,9 +7956,30 @@ static void clean_up(bool restarting)
 	curl_global_cleanup();
 }
 
-void _quit(int status)
+/* Should all else fail and we're unable to clean up threads due to locking
+ * issues etc, just silently exit. */
+static void *killall_thread(void __maybe_unused *arg)
 {
-	clean_up(false);
+	pthread_detach(pthread_self());
+	pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
+	sleep(5);
+	exit(1);
+	return NULL;
+}
+
+void __quit(int status, bool clean)
+{
+	pthread_t killall_t;
+
+	if (unlikely(pthread_create(&killall_t, NULL, killall_thread, NULL)))
+		exit(1);
+
+	if (clean)
+		clean_up(false);
+#ifdef HAVE_CURSES
+	else
+		disable_curses();
+#endif
 
 #if defined(unix) || defined(__APPLE__)
 	if (forkpid > 0) {
@@ -7892,8 +7987,14 @@ void _quit(int status)
 		forkpid = 0;
 	}
 #endif
+	pthread_cancel(killall_t);
 
 	exit(status);
+}
+
+void _quit(int status)
+{
+	__quit(status, true);
 }
 
 #ifdef HAVE_CURSES
@@ -8525,16 +8626,17 @@ static void initialise_usb(void) {
 int main(int argc, char *argv[])
 {
 	struct sigaction handler;
+	bool pool_msg = false;
 	struct thr_info *thr;
 	struct block *block;
+	int i, j, slept = 0;
 	unsigned int k;
-	int i, j;
 	char *s;
 
 	/* This dangerous functions tramples random dynamically allocated
 	 * variables so do it before anything at all */
 	if (unlikely(curl_global_init(CURL_GLOBAL_ALL)))
-		quit(1, "Failed to curl_global_init");
+		early_quit(1, "Failed to curl_global_init");
 
 #if LOCK_TRACKING
 	// Must be first
@@ -8561,19 +8663,19 @@ int main(int argc, char *argv[])
 
 	mutex_init(&lp_lock);
 	if (unlikely(pthread_cond_init(&lp_cond, NULL)))
-		quit(1, "Failed to pthread_cond_init lp_cond");
+		early_quit(1, "Failed to pthread_cond_init lp_cond");
 
 	mutex_init(&restart_lock);
 	if (unlikely(pthread_cond_init(&restart_cond, NULL)))
-		quit(1, "Failed to pthread_cond_init restart_cond");
+		early_quit(1, "Failed to pthread_cond_init restart_cond");
 
 	if (unlikely(pthread_cond_init(&gws_cond, NULL)))
-		quit(1, "Failed to pthread_cond_init gws_cond");
+		early_quit(1, "Failed to pthread_cond_init gws_cond");
 
 	/* Create a unique get work queue */
 	getq = tq_new();
 	if (!getq)
-		quit(1, "Failed to create getq");
+		early_quit(1, "Failed to create getq");
 	/* We use the getq mutex as the staged lock */
 	stgd_lock = &getq->mutex;
 
@@ -8621,7 +8723,7 @@ int main(int argc, char *argv[])
 
 	opt_parse(&argc, argv, applog_and_exit);
 	if (argc != 1)
-		quit(1, "Unexpected extra commandline arguments");
+		early_quit(1, "Unexpected extra commandline arguments");
 
 	if (!config_loaded)
 		load_default_config();
@@ -8681,7 +8783,7 @@ int main(int argc, char *argv[])
 	total_control_threads = 8;
 	control_thr = calloc(total_control_threads, sizeof(*thr));
 	if (!control_thr)
-		quit(1, "Failed to calloc control_thr");
+		early_quit(1, "Failed to calloc control_thr");
 
 	gwsched_thr_id = 0;
 
@@ -8693,7 +8795,7 @@ int main(int argc, char *argv[])
 	usbres_thr_id = 1;
 	thr = &control_thr[usbres_thr_id];
 	if (thr_info_create(thr, NULL, usb_resource_thread, thr))
-		quit(1, "usb resource thread create failed");
+		early_quit(1, "usb resource thread create failed");
 	pthread_detach(thr->pth);
 #endif
 
@@ -8712,7 +8814,7 @@ int main(int argc, char *argv[])
 			else
 				applog(LOG_ERR, " %2d. %s %d (driver: %s)", i, cgpu->drv->name, cgpu->device_id, cgpu->drv->dname);
 		}
-		quit(0, "%d devices listed", total_devices);
+		early_quit(0, "%d devices listed", total_devices);
 	}
 
 	mining_threads = 0;
@@ -8741,7 +8843,7 @@ int main(int argc, char *argv[])
 	}
 #else
 	if (!total_devices)
-		quit(1, "All devices disabled, cannot mine!");
+		early_quit(1, "All devices disabled, cannot mine!");
 #endif
 
 	most_devices = total_devices;
@@ -8764,7 +8866,7 @@ int main(int argc, char *argv[])
 #ifdef HAVE_CURSES
 		if (!use_curses || !input_pool(false))
 #endif
-			quit(1, "Pool setup failed");
+			early_quit(1, "Pool setup failed");
 	}
 
 	for (i = 0; i < total_pools; i++) {
@@ -8776,11 +8878,11 @@ int main(int argc, char *argv[])
 
 		if (!pool->rpc_userpass) {
 			if (!pool->rpc_user || !pool->rpc_pass)
-				quit(1, "No login credentials supplied for pool %u %s", i, pool->rpc_url);
+				early_quit(1, "No login credentials supplied for pool %u %s", i, pool->rpc_url);
 			siz = strlen(pool->rpc_user) + strlen(pool->rpc_pass) + 2;
 			pool->rpc_userpass = malloc(siz);
 			if (!pool->rpc_userpass)
-				quit(1, "Failed to malloc userpass");
+				early_quit(1, "Failed to malloc userpass");
 			snprintf(pool->rpc_userpass, siz, "%s:%s", pool->rpc_user, pool->rpc_pass);
 		}
 	}
@@ -8799,11 +8901,11 @@ int main(int argc, char *argv[])
 
 	mining_thr = calloc(mining_threads, sizeof(thr));
 	if (!mining_thr)
-		quit(1, "Failed to calloc mining_thr");
+		early_quit(1, "Failed to calloc mining_thr");
 	for (i = 0; i < mining_threads; i++) {
 		mining_thr[i] = calloc(1, sizeof(*thr));
 		if (!mining_thr[i])
-			quit(1, "Failed to calloc mining_thr[%d]", i);
+			early_quit(1, "Failed to calloc mining_thr[%d]", i);
 	}
 
 	// Start threads
@@ -8824,7 +8926,7 @@ int main(int argc, char *argv[])
 				continue;
 
 			if (unlikely(thr_info_create(thr, NULL, miner_thread, thr)))
-				quit(1, "thread %d create failed", thr->id);
+				early_quit(1, "thread %d create failed", thr->id);
 
 			cgpu->thr[j] = thr;
 
@@ -8847,40 +8949,39 @@ int main(int argc, char *argv[])
 		pool->idle = true;
 	}
 
+	/* Look for at least one active pool before starting */
 	applog(LOG_NOTICE, "Probing for an alive pool");
+	probe_pools();
 	do {
-		int slept = 0;
+		sleep(1);
+		slept++;
+	} while (!pools_active && slept < 60);
 
-		/* Look for at least one active pool before starting */
-		probe_pools();
-		do {
-			sleep(1);
-			slept++;
-		} while (!pools_active && slept < 60);
-
-		if (!pools_active) {
+	while (!pools_active) {
+		if (!pool_msg) {
 			applog(LOG_ERR, "No servers were found that could be used to get work from.");
 			applog(LOG_ERR, "Please check the details from the list below of the servers you have input");
 			applog(LOG_ERR, "Most likely you have input the wrong URL, forgotten to add a port, or have not set up workers");
 			for (i = 0; i < total_pools; i++) {
-				struct pool *pool;
+				struct pool *pool = pools[i];
 
-				pool = pools[i];
 				applog(LOG_WARNING, "Pool: %d  URL: %s  User: %s  Password: %s",
-				       i, pool->rpc_url, pool->rpc_user, pool->rpc_pass);
+				i, pool->rpc_url, pool->rpc_user, pool->rpc_pass);
 			}
-#ifdef HAVE_CURSES
-			if (use_curses) {
-				halfdelay(255);
-				applog(LOG_ERR, "Press any key to exit, or cgminer will try again in 30s.");
-				if (getch() != ERR)
-					quit(0, "No servers could be used! Exiting.");
-				cbreak();
-			} else
-#endif
-				quit(0, "No servers could be used! Exiting.");
+			pool_msg = true;
+			if (use_curses)
+				applog(LOG_ERR, "Press any key to exit, or cgminer will wait indefinitely for an alive pool.");
 		}
-	} while (!pools_active);
+		if (!use_curses)
+			early_quit(0, "No servers could be used! Exiting.");
+#ifdef HAVE_CURSES
+		wrefresh(logwin);
+		halfdelay(10);
+		if (getch() != ERR)
+			early_quit(0, "No servers could be used! Exiting.");
+		cbreak();
+#endif
+	};
 
 begin_bench:
 	total_mhashes_done = 0;
@@ -8898,27 +8999,27 @@ begin_bench:
 	thr = &control_thr[watchpool_thr_id];
 	/* start watchpool thread */
 	if (thr_info_create(thr, NULL, watchpool_thread, NULL))
-		quit(1, "watchpool thread create failed");
+		early_quit(1, "watchpool thread create failed");
 	pthread_detach(thr->pth);
 
 	watchdog_thr_id = 3;
 	thr = &control_thr[watchdog_thr_id];
 	/* start watchdog thread */
 	if (thr_info_create(thr, NULL, watchdog_thread, NULL))
-		quit(1, "watchdog thread create failed");
+		early_quit(1, "watchdog thread create failed");
 	pthread_detach(thr->pth);
 
 	/* Create API socket thread */
 	api_thr_id = 5;
 	thr = &control_thr[api_thr_id];
 	if (thr_info_create(thr, NULL, api_thread, thr))
-		quit(1, "API thread create failed");
+		early_quit(1, "API thread create failed");
 
 #ifdef USE_USBUTILS
 	hotplug_thr_id = 6;
 	thr = &control_thr[hotplug_thr_id];
 	if (thr_info_create(thr, NULL, hotplug_thread, thr))
-		quit(1, "hotplug thread create failed");
+		early_quit(1, "hotplug thread create failed");
 	pthread_detach(thr->pth);
 #endif
 
@@ -8929,13 +9030,15 @@ begin_bench:
 	input_thr_id = 7;
 	thr = &control_thr[input_thr_id];
 	if (thr_info_create(thr, NULL, input_thread, thr))
-		quit(1, "input thread create failed");
+		early_quit(1, "input thread create failed");
 	pthread_detach(thr->pth);
 #endif
 
 	/* Just to be sure */
 	if (total_control_threads != 8)
-		quit(1, "incorrect total_control_threads (%d) should be 8", total_control_threads);
+		early_quit(1, "incorrect total_control_threads (%d) should be 8", total_control_threads);
+
+	set_highprio();
 
 	/* Once everything is set up, main() becomes the getwork scheduler */
 	while (42) {
@@ -8962,6 +9065,11 @@ begin_bench:
 
 		/* Wait until hash_pop tells us we need to create more work */
 		if (ts > max_staged) {
+			if (work_emptied) {
+				opt_queue++;
+				work_emptied = false;
+			}
+			work_filled = true;
 			pthread_cond_wait(&gws_cond, stgd_lock);
 			ts = __total_staged();
 		}
@@ -8971,6 +9079,11 @@ begin_bench:
 			/* Keeps slowly generating work even if it's not being
 			 * used to keep last_getwork incrementing and to see
 			 * if pools are still alive. */
+			if (work_emptied) {
+				opt_queue++;
+				work_emptied = false;
+			}
+			work_filled = true;
 			work = hash_pop(false);
 			if (work)
 				discard_work(work);
